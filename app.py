@@ -1,6 +1,7 @@
 # app.py — Multimode survey without manifest
-# Uses all files in images/ or videos/ with 2s exposure, random order per participant.
+# Uses all image/video files in the repo (root) with 2s exposure.
 # Modes via URL: img_sliders (default), img_text, vid_sliders, vid_text.
+# Order is deterministic per participant_id (same ID -> same order).
 
 # --- imports ---
 import time
@@ -12,12 +13,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
 
-import pandas as pd  # currently not heavily used, but kept for future
+import pandas as pd  # kept for potential future use
 import streamlit as st
 
 # ======================== CONFIG ========================
-IMAGE_DIR = Path(".")
-VIDEO_DIR = Path(".")
+# Currently use repo root as media directory, since your files are not in folders.
+# If you later move them into images/ and videos/, change these to Path("images") / Path("videos").
+IMAGE_DIR = Path(".")   # or Path("images")
+VIDEO_DIR = Path(".")   # or Path("videos")
 
 SHOW_SECONDS = 2.0
 
@@ -37,7 +40,7 @@ try:
 except Exception:
     SHEET_URL = ""
 
-st.set_page_config(page_title="2-Second Media Survey (Multimode, no manifest)", layout="centered")
+st.set_page_config(page_title="2-Second Media Survey (Multimode)", layout="centered")
 
 # --- responsive image helper (no scrolling) ---
 def render_image_responsive(path: str, max_vw: int = 80, max_vh: int = 70):
@@ -65,7 +68,7 @@ def render_video_autoplay(path: Path, max_vw: int = 80, max_vh: int = 70):
     data = path.read_bytes()
     b64 = base64.b64encode(data).decode("utf-8")
     ext = path.suffix.lower().lstrip(".")
-    mime = "video/mp4" if ext in {"mp4", "mov"} else f"video/{ext}"
+    mime = "video/mp4" if ext in {"mp4", "mov", "m4v"} else f"video/{ext}"
     st.markdown(
         f"""
         <div style="display:flex;justify-content:center;">
@@ -100,7 +103,7 @@ with st.sidebar:
 # -------------------- Utility --------------------
 def get_mode() -> str:
     try:
-        params = st.query_params  # new API
+        params = st.query_params  # new Streamlit API
         raw = params.get("mode", [DEFAULT_MODE])
         mode = raw[0] if isinstance(raw, list) else raw
     except Exception:
@@ -110,13 +113,18 @@ def get_mode() -> str:
     return mode if mode in valid else DEFAULT_MODE
 
 def _seed_to_int(seed: str) -> int:
+    """Convert a string (e.g., participant_id) to a stable integer seed."""
     return int(hashlib.sha256(seed.encode("utf-8")).hexdigest(), 16) % (2**32 - 1)
 
 def generate_participant_id() -> str:
     return uuid.uuid4().hex[:8].upper()
 
 def randomize_order(n: int, seed: str) -> List[int]:
-    rng = random.Random(seed)
+    """
+    Deterministic random order: same n + same seed -> same order.
+    Different seeds -> (almost always) different order.
+    """
+    rng = random.Random(_seed_to_int(seed))
     order = list(range(n))
     rng.shuffle(order)
     return order
@@ -295,6 +303,12 @@ if st.session_state.ws is None and SHEET_URL:
 # ===== CONSENT =====
 if st.session_state.phase == "consent":
     st.title("Consent to Participate")
+
+    # Reset button: clears state so you can test with a truly "new participant"
+    if st.button("🔁 Reset for new participant"):
+        st.session_state.clear()
+        st.rerun()
+
     st.write(f"""
 This study shows a series of **{'images' if mode.startswith('img') else 'videos'}** for **{SHOW_SECONDS:.0f} seconds** each.
 After each stimulus, you will {'rate emotions (0–100) and estimate the result' if 'sliders' in mode else 'write a brief free-text response'}.
@@ -348,19 +362,23 @@ elif st.session_state.phase == "demographics":
                 and st.session_state.nationality
                 and st.session_state.age > 0
             ):
-                # Load media from folders depending on mode
+                # Load media from folder depending on mode
                 if mode.startswith("img"):
                     media_files = load_media_files(IMAGE_DIR, {".png", ".jpg", ".jpeg", ".webp", ".bmp"})
                 else:
                     media_files = load_media_files(VIDEO_DIR, {".mp4", ".mov", ".m4v"})
 
                 if not media_files:
-                    st.error(f"No media files found in {'images' if mode.startswith('img') else 'videos'} folder.")
+                    st.error(f"No media files found in this folder for mode '{mode}'.")
                     st.stop()
 
                 st.session_state.media_list = media_files
                 n_media = len(media_files)
-                st.session_state.order = randomize_order(n_media, seed=st.session_state.participant_id)
+
+                # Deterministic random order per participant_id (and mode to avoid collisions)
+                seed = f"{st.session_state.participant_id}_{mode}"
+                st.session_state.order = randomize_order(n_media, seed=seed)
+
                 st.session_state.idx = 0
                 st.session_state.show_started_at = None
                 advance("show")
