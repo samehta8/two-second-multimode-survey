@@ -1,19 +1,17 @@
-# app.py — Multimode survey without manifest
-# Uses all image/video files in the repo (root) with 2s exposure.
+# app.py — Multimode survey (no manifest, root media)
+# Uses all image/video files in the repo root with 2s exposure.
 # Modes via URL: img_sliders (default), img_text, vid_sliders, vid_text.
-# Order is deterministic per participant_id (same ID -> same order).
+# Order is fully random each time a participant starts.
 
 # --- imports ---
 import time
 import uuid
 import random
-import hashlib
 import base64
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
 
-import pandas as pd  # kept for potential future use
 import streamlit as st
 
 # ======================== CONFIG ========================
@@ -99,6 +97,7 @@ with st.sidebar:
     st.write("age:", st.session_state.get("age"))
     st.write("gender:", st.session_state.get("gender"))
     st.write("nationality:", st.session_state.get("nationality"))
+    st.write("order:", st.session_state.get("order"))  # helpful to see permutations while testing
 
 # -------------------- Utility --------------------
 def get_mode() -> str:
@@ -112,21 +111,16 @@ def get_mode() -> str:
     valid = {"img_sliders", "img_text", "vid_sliders", "vid_text"}
     return mode if mode in valid else DEFAULT_MODE
 
-def _seed_to_int(seed: str) -> int:
-    """Convert a string (e.g., participant_id) to a stable integer seed."""
-    return int(hashlib.sha256(seed.encode("utf-8")).hexdigest(), 16) % (2**32 - 1)
-
 def generate_participant_id() -> str:
     return uuid.uuid4().hex[:8].upper()
 
-def randomize_order(n: int, seed: str) -> List[int]:
+def randomize_order(n: int) -> List[int]:
     """
-    Deterministic random order: same n + same seed -> same order.
-    Different seeds -> (almost always) different order.
+    Fully random order each time this is called.
+    No dependence on participant_id.
     """
-    rng = random.Random(_seed_to_int(seed))
     order = list(range(n))
-    rng.shuffle(order)
+    random.shuffle(order)
     return order
 
 def ratings_to_dict(sliders: Dict[str, int]) -> Dict[str, int]:
@@ -375,9 +369,8 @@ elif st.session_state.phase == "demographics":
                 st.session_state.media_list = media_files
                 n_media = len(media_files)
 
-                # Deterministic random order per participant_id (and mode to avoid collisions)
-                seed = f"{st.session_state.participant_id}_{mode}"
-                st.session_state.order = randomize_order(n_media, seed=seed)
+                # Fully random order each time demographics is submitted
+                st.session_state.order = randomize_order(n_media)
 
                 st.session_state.idx = 0
                 st.session_state.show_started_at = None
