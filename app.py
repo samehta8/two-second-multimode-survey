@@ -1,5 +1,6 @@
 # app.py — Multimode survey (images/videos; sliders/text) with 2s exposure
-# Uses your Excel manifest format + stratified sampling + Google Sheets saving
+# Uses your Excel manifest format + random order per participant + Google Sheets saving
+# No balancing / quotas: uses all available media per type (Image/Video)
 
 # --- imports ---
 import time
@@ -9,7 +10,7 @@ import hashlib
 import base64
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 
 import pandas as pd
 import streamlit as st
@@ -20,7 +21,6 @@ VIDEO_DIR = Path("videos")
 MANIFEST_XLSX = Path("manifest.xlsx")
 
 SHOW_SECONDS = 2.0
-MAX_MEDIA_PER_PARTICIPANT = 30
 
 # Modes: img_sliders (default) | img_text | vid_sliders | vid_text
 DEFAULT_MODE = "img_sliders"
@@ -31,20 +31,6 @@ EMOTIONS = [
     "Surprised", "Neutral", "Disgusted", "Contempt",
 ]
 RATING_MIN, RATING_MAX, RATING_DEFAULT = 0, 100, 0
-
-# Stratified quotas (outcome x pd) — total must be 30
-QUOTAS = {
-    ("Winner", "High"): 7,
-    ("Winner", "Low"): 8,
-    ("Loser", "High"): 7,
-    ("Loser", "Low"): 8,
-}
-
-# Allowed values (validation)
-OUTCOME_VALUES = {"Winner", "Loser"}
-PD_VALUES = {"High", "Low"}
-GENDER_VALUES = {"Male", "Female"}
-MEDIA_VALUES = {"image", "video"}
 
 # Optional Google Sheets (safe to leave empty locally)
 try:
@@ -148,7 +134,7 @@ def ratings_to_dict(sliders: Dict[str, int]) -> Dict[str, int]:
         "rating_contempt": sliders["Contempt"],
     }
 
-# -------------------- Manifest loading & stratified sampling --------------------
+# -------------------- Manifest loading (no quotas) --------------------
 def load_manifest_xlsx(path: Path) -> pd.DataFrame:
     """
     Read your Excel manifest and normalize column names/values.
@@ -210,22 +196,12 @@ def load_manifest_xlsx(path: Path) -> pd.DataFrame:
         "High": "High",
     })
 
-    # Gender: Male/Female (normalize)
+    # Gender: Male/Female
     df["gender"] = df["gender"].str.title()
     df["gender"] = df["gender"].replace({
         "Male": "Male",
         "Female": "Female",
     })
-
-    # Validate allowed values
-    if not df["media_type"].isin({"image", "video"}).all():
-        raise ValueError("Media Type must be Image/Video (or similar) for all rows.")
-    if not df["outcome"].isin(OUTCOME_VALUES).all():
-        raise ValueError("Win or Lose must be Win/Loss for all rows.")
-    if not df["pd"].isin(PD_VALUES).all():
-        raise ValueError("Low/High PD must be Low/High for all rows.")
-    if not df["gender"].isin(GENDER_VALUES).all():
-        raise ValueError("Gender must be Male/Female for all rows (currently).")
 
     # Attach absolute paths based on media_type
     def path_for(row):
@@ -234,6 +210,7 @@ def load_manifest_xlsx(path: Path) -> pd.DataFrame:
 
     df["filepath"] = df.apply(path_for, axis=1)
 
+    # Drop rows whose files are missing
     missing_mask = ~df["filepath"].apply(lambda p: p.exists())
     missing_files = df.loc[missing_mask, "filename"].tolist()
     if missing_files:
@@ -251,40 +228,7 @@ def load_manifest_xlsx(path: Path) -> pd.DataFrame:
             "Please upload media files to images/ and videos/."
         )
 
-
     return df
-
-def stratified_sample(df: pd.DataFrame, media_kind: str, quotas: dict, seed: str) -> pd.DataFrame:
-    """
-    Select exactly sum(quotas.values()) rows from df where df.media_type == media_kind,
-    respecting (outcome, pd) quotas.
-    Deterministic per participant via seed.
-    """
-    dfk = df[df["media_type"] == media_kind].copy()
-    if dfk.empty:
-        raise ValueError(f"No rows in manifest for media_type='{media_kind}'")
-
-    seed_int = _seed_to_int(seed)
-    parts = []
-    for (outcome, pd_level), n in quotas.items():
-        cell = dfk[(dfk["outcome"] == outcome) & (dfk["pd"] == pd_level)]
-        if len(cell) < n:
-            raise ValueError(
-                f"Not enough items for ({outcome}, {pd_level}) in {media_kind}: need {n}, have {len(cell)}"
-            )
-        sample = cell.sample(n=n, random_state=seed_int)
-        parts.append(sample)
-        seed_int = (seed_int * 1664525 + 1013904223) % (2**32)
-
-    sel = pd.concat(parts, ignore_index=True)
-    # Shuffle overall selection deterministically (separate seed)
-    sel = sel.sample(frac=1.0, random_state=_seed_to_int(seed + "_order")).reset_index(drop=True)
-
-    # Should sum to 30
-    n_total = sum(quotas.values())
-    if len(sel) != n_total:
-        st.warning(f"Selected {len(sel)} items, but quotas sum to {n_total}.")
-    return sel
 
 # -------------------- Google Sheets I/O (optional) --------------------
 def get_worksheet():
@@ -369,7 +313,7 @@ def append_row_to_sheet(ws, row: Dict[str, Any]):
 def init_state(mode: str):
     ss = st.session_state
     ss.setdefault("phase", "consent")
-    ss.setdefault("study_id", "two_second_multimode_v2")
+    ss.setdefault("study_id", "two_second_multimode_simple")
     ss.setdefault("mode", mode)
 
     # Participant info
@@ -500,7 +444,7 @@ elif st.session_state.phase == "demographics":
                 and st.session_state.nationality
                 and st.session_state.age > 0
             ):
-                # Load and sample manifest
+                # Load and filter manifest by type
                 try:
                     manifest_df = load_manifest_xlsx(MANIFEST_XLSX)
                 except Exception as e:
@@ -508,13 +452,10 @@ elif st.session_state.phase == "demographics":
                     st.stop()
 
                 media_kind = "image" if mode.startswith("img") else "video"
+                selection_df = manifest_df[manifest_df["media_type"] == media_kind].copy()
 
-                try:
-                    selection_df = stratified_sample(
-                        manifest_df, media_kind=media_kind, quotas=QUOTAS, seed=st.session_state.participant_id
-                    )
-                except Exception as e:
-                    st.error(f"Failed to build the {sum(QUOTAS.values())}-stimulus set: {e}")
+                if selection_df.empty:
+                    st.error(f"No rows found in manifest for media type '{media_kind}'.")
                     st.stop()
 
                 st.session_state.selection_df = selection_df
