@@ -1,6 +1,6 @@
-# app.py — Multimode survey (images/videos; sliders/text) with 2s exposure
-# Uses your Excel manifest format + random order per participant + Google Sheets saving
-# No balancing / quotas: uses all available media per type (Image/Video)
+# app.py — Multimode survey without manifest
+# Uses all files in images/ or videos/ with 2s exposure, random order per participant.
+# Modes via URL: img_sliders (default), img_text, vid_sliders, vid_text.
 
 # --- imports ---
 import time
@@ -12,13 +12,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any
 
-import pandas as pd
+import pandas as pd  # currently not heavily used, but kept for future
 import streamlit as st
 
 # ======================== CONFIG ========================
 IMAGE_DIR = Path("images")
 VIDEO_DIR = Path("videos")
-MANIFEST_XLSX = Path("manifest.xlsx")
 
 SHOW_SECONDS = 2.0
 
@@ -38,7 +37,7 @@ try:
 except Exception:
     SHEET_URL = ""
 
-st.set_page_config(page_title="2-Second Media Survey (Multimode)", layout="centered")
+st.set_page_config(page_title="2-Second Media Survey (Multimode, no manifest)", layout="centered")
 
 # --- responsive image helper (no scrolling) ---
 def render_image_responsive(path: str, max_vw: int = 80, max_vh: int = 70):
@@ -134,101 +133,14 @@ def ratings_to_dict(sliders: Dict[str, int]) -> Dict[str, int]:
         "rating_contempt": sliders["Contempt"],
     }
 
-# -------------------- Manifest loading (no quotas) --------------------
-def load_manifest_xlsx(path: Path) -> pd.DataFrame:
-    """
-    Read your Excel manifest and normalize column names/values.
-    Expected original columns:
-      - Media Type
-      - Saved File Name
-      - Athlete Name
-      - Nationality
-      - Low/High PD
-      - Gender
-      - Olympic/Paralympic
-      - Win or Lose
-    """
-    if not path.exists():
-        raise FileNotFoundError(f"Manifest Excel not found at {path}")
-    df = pd.read_excel(path)  # requires openpyxl
-
-    # rename your columns to canonical names
-    rename_map = {
-        "Media Type": "media_type",
-        "Saved File Name": "filename",
-        "Low/High PD": "pd",
-        "Win or Lose": "outcome",
-        "Gender": "gender",
-    }
-    df = df.rename(columns=rename_map)
-
-    required = {"media_type", "filename", "outcome", "pd", "gender"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Manifest missing columns after rename: {', '.join(sorted(missing))}")
-
-    # normalize strings
-    for col in ["media_type", "filename", "outcome", "pd", "gender"]:
-        df[col] = df[col].astype(str).str.strip()
-
-    # map your values to canonical
-    # Media Type: Image/Video -> image/video
-    df["media_type"] = df["media_type"].str.lower()
-    df["media_type"] = df["media_type"].replace({
-        "video": "video",
-        "vid": "video",
-        "image": "image",
-        "img": "image"
-    })
-
-    # Outcome: Win/Loss -> Winner/Loser
-    df["outcome"] = df["outcome"].str.title()
-    df["outcome"] = df["outcome"].replace({
-        "Win": "Winner",
-        "Loss": "Loser",
-        "Lose": "Loser",
-    })
-
-    # PD: Low/High PD -> Low / High
-    df["pd"] = df["pd"].str.title()
-    df["pd"] = df["pd"].replace({
-        "Low": "Low",
-        "High": "High",
-    })
-
-    # Gender: Male/Female
-    df["gender"] = df["gender"].str.title()
-    df["gender"] = df["gender"].replace({
-        "Male": "Male",
-        "Female": "Female",
-    })
-
-    # Attach absolute paths based on media_type
-    def path_for(row):
-        base_dir = IMAGE_DIR if row["media_type"] == "image" else VIDEO_DIR
-        return base_dir / row["filename"]
-
-    df["filepath"] = df.apply(path_for, axis=1)
-
-    # Drop rows whose files are missing
-    missing_mask = ~df["filepath"].apply(lambda p: p.exists())
-    missing_files = df.loc[missing_mask, "filename"].tolist()
-    if missing_files:
-        preview = ", ".join(missing_files[:5])
-        extra = "" if len(missing_files) <= 5 else f" (+{len(missing_files)-5} more)"
-        st.warning(
-            f"Dropping {len(missing_files)} manifest rows whose files are missing: "
-            f"{preview}{extra}"
-        )
-        df = df.loc[~missing_mask].copy()
-
-    if df.empty:
-        raise FileNotFoundError(
-            "After dropping rows with missing files, the manifest is empty. "
-            "Please upload media files to images/ and videos/."
-        )
-
-    return df
+def load_media_files(dirpath: Path, exts) -> List[Path]:
+    if not dirpath.exists():
+        return []
+    files = [
+        p for p in sorted(dirpath.iterdir())
+        if p.is_file() and p.suffix.lower() in exts
+    ]
+    return files
 
 # -------------------- Google Sheets I/O (optional) --------------------
 def get_worksheet():
@@ -250,12 +162,12 @@ def get_worksheet():
         try:
             ws = sh.worksheet("responses")
         except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title="responses", rows=4000, cols=60)
+            ws = sh.add_worksheet(title="responses", rows=4000, cols=40)
             ws.append_row([
                 "study_id", "mode", "participant_id", "consented", "consent_timestamp_iso",
                 "name", "age", "gender", "nationality",
                 "trial_index", "order_index",
-                "media_kind", "media_file", "outcome", "pd", "gender_attr",
+                "media_kind", "media_file",
                 "rating_angry", "rating_happy", "rating_sad", "rating_scared",
                 "rating_surprised", "rating_neutral", "rating_disgusted", "rating_contempt",
                 "result_estimate", "free_text",
@@ -288,9 +200,6 @@ def append_row_to_sheet(ws, row: Dict[str, Any]):
         row.get("order_index",""),
         row.get("media_kind",""),
         row.get("media_file",""),
-        row.get("outcome",""),
-        row.get("pd",""),
-        row.get("gender_attr",""),
         row.get("rating_angry",""),
         row.get("rating_happy",""),
         row.get("rating_sad",""),
@@ -313,7 +222,7 @@ def append_row_to_sheet(ws, row: Dict[str, Any]):
 def init_state(mode: str):
     ss = st.session_state
     ss.setdefault("phase", "consent")
-    ss.setdefault("study_id", "two_second_multimode_simple")
+    ss.setdefault("study_id", "two_second_multimode_nomf")
     ss.setdefault("mode", mode)
 
     # Participant info
@@ -325,9 +234,8 @@ def init_state(mode: str):
     ss.setdefault("gender", "")
     ss.setdefault("nationality", "")
 
-    # Media selection (filled after demographics)
-    ss.setdefault("selection_df", None)  # dataframe of selected rows
-    ss.setdefault("media_list", [])      # list[Path] aligned with selection_df rows
+    # Media selection
+    ss.setdefault("media_list", [])      # list[Path]
     ss.setdefault("idx", 0)
     ss.setdefault("order", [])
     ss.setdefault("show_started_at", None)
@@ -349,7 +257,6 @@ def record_and_next(extra: Dict[str, Any]):
     order_index = i + 1
     media_idx = ss.order[i]
     media_path = ss.media_list[media_idx]
-    row_meta = ss.selection_df.iloc[media_idx]
 
     base_row = {
         "study_id": ss.study_id,
@@ -363,11 +270,8 @@ def record_and_next(extra: Dict[str, Any]):
         "nationality": ss.nationality,
         "trial_index": media_idx + 1,
         "order_index": order_index,
-        "media_kind": row_meta["media_type"],
-        "media_file": row_meta["filename"],
-        "outcome": row_meta["outcome"],
-        "pd": row_meta["pd"],
-        "gender_attr": row_meta["gender"],
+        "media_kind": "image" if ss.mode.startswith("img") else "video",
+        "media_file": media_path.name,
         **extra,
         "response_timestamp_iso": datetime.utcnow().isoformat() + "Z",
     }
@@ -444,24 +348,18 @@ elif st.session_state.phase == "demographics":
                 and st.session_state.nationality
                 and st.session_state.age > 0
             ):
-                # Load and filter manifest by type
-                try:
-                    manifest_df = load_manifest_xlsx(MANIFEST_XLSX)
-                except Exception as e:
-                    st.error(f"Failed to load manifest: {e}")
+                # Load media from folders depending on mode
+                if mode.startswith("img"):
+                    media_files = load_media_files(IMAGE_DIR, {".png", ".jpg", ".jpeg", ".webp", ".bmp"})
+                else:
+                    media_files = load_media_files(VIDEO_DIR, {".mp4", ".mov", ".m4v"})
+
+                if not media_files:
+                    st.error(f"No media files found in {'images' if mode.startswith('img') else 'videos'} folder.")
                     st.stop()
 
-                media_kind = "image" if mode.startswith("img") else "video"
-                selection_df = manifest_df[manifest_df["media_type"] == media_kind].copy()
-
-                if selection_df.empty:
-                    st.error(f"No rows found in manifest for media type '{media_kind}'.")
-                    st.stop()
-
-                st.session_state.selection_df = selection_df
-                st.session_state.media_list = selection_df["filepath"].tolist()
-
-                n_media = len(st.session_state.media_list)
+                st.session_state.media_list = media_files
+                n_media = len(media_files)
                 st.session_state.order = randomize_order(n_media, seed=st.session_state.participant_id)
                 st.session_state.idx = 0
                 st.session_state.show_started_at = None
@@ -489,7 +387,7 @@ elif st.session_state.phase == "show":
 
     st.subheader(f"Stimulus {i+1} of {total_media}")
 
-    if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+    if mode.startswith("img"):
         render_image_responsive(str(path), max_vw=80, max_vh=70)
     else:
         render_video_autoplay(path, max_vw=80, max_vh=70)
