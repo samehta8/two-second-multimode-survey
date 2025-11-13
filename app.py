@@ -16,8 +16,8 @@ import pandas as pd  # currently not heavily used, but kept for future
 import streamlit as st
 
 # ======================== CONFIG ========================
-IMAGE_DIR = Path("images")
-VIDEO_DIR = Path("videos")
+IMAGE_DIR = Path(".")
+VIDEO_DIR = Path(".")
 
 SHOW_SECONDS = 2.0
 
