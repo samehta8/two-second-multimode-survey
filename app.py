@@ -305,7 +305,7 @@ if st.session_state.phase == "consent":
 
     st.write(f"""
 This study shows a series of **{'images' if mode.startswith('img') else 'videos'}** for **{SHOW_SECONDS:.0f} seconds** each.
-After each stimulus, you will {'rate emotions (0–100) and estimate the result' if 'sliders' in mode else 'write a brief free-text response'}.
+After each stimulus, you will {'rate emotions (0–100) and estimate whether the athlete won or lost' if 'sliders' in mode else 'describe the emotions you saw and estimate whether the athlete won or lost'}.
 Participation is voluntary; you may stop at any time.
     """)
 
@@ -419,16 +419,17 @@ elif st.session_state.phase == "rate":
 
     st.subheader(f"Respond to the last stimulus ({pos_1based} of {total_media})")
 
+    # Slider modes: emotions sliders + result estimate (Won/Lost)
     if "sliders" in st.session_state.mode:
-        st.caption("Move each slider (0–100). Also estimate the result (Won/Lost/Unsure).")
+        st.caption("Move each slider (0–100). Then estimate whether the athlete won or lost the match.")
         with st.form(key=f"ratings_form_{i}"):
             sliders = {}
             for emo in EMOTIONS:
                 sliders[emo] = st.slider(emo, RATING_MIN, RATING_MAX, RATING_DEFAULT, key=f"{emo}_{i}")
 
             result_estimate = st.radio(
-                "Result estimate (what do you think happened in the match?)",
-                ["Won", "Lost", "Unsure"],
+                "According to your estimation, did the athlete win or lose the match?",
+                ["Won", "Lost"],
                 horizontal=True,
                 index=None,
                 key=f"result_{i}",
@@ -437,7 +438,7 @@ elif st.session_state.phase == "rate":
             submitted = st.form_submit_button("Submit")
             if submitted:
                 if result_estimate is None:
-                    st.error("Please select Won, Lost, or Unsure before continuing.")
+                    st.error("Please select Win or Lose before continuing.")
                 else:
                     extra = {
                         **ratings_to_dict(sliders),
@@ -445,19 +446,38 @@ elif st.session_state.phase == "rate":
                         "free_text": "",
                     }
                     record_and_next(extra)
+
+    # Text modes: open text + result estimate (Won/Lost)
     else:
-        st.caption("Write a brief response below.")
+        st.caption("Describe the emotions you saw and estimate whether the athlete won or lost.")
         with st.form(key=f"text_form_{i}"):
-            text = st.text_area("Your response", height=140, key=f"text_{i}")
+            result_estimate = st.radio(
+                "According to your estimation, did the athlete win or lose the match?",
+                ["Won", "Lost"],
+                horizontal=True,
+                index=None,
+                key=f"text_result_{i}",
+            )
+
+            text = st.text_area(
+                "What emotions did the athlete display? "
+                "Mention any and all types of emotions that you can think of.",
+                height=160,
+                key=f"text_{i}",
+            )
+
             submitted = st.form_submit_button("Submit")
             if submitted:
-                extra = {
-                    "rating_angry": "", "rating_happy": "", "rating_sad": "", "rating_scared": "",
-                    "rating_surprised": "", "rating_neutral": "", "rating_disgusted": "", "rating_contempt": "",
-                    "result_estimate": "",
-                    "free_text": text.strip(),
-                }
-                record_and_next(extra)
+                if result_estimate is None:
+                    st.error("Please select Win or Lose before continuing.")
+                else:
+                    extra = {
+                        "rating_angry": "", "rating_happy": "", "rating_sad": "", "rating_scared": "",
+                        "rating_surprised": "", "rating_neutral": "", "rating_disgusted": "", "rating_contempt": "",
+                        "result_estimate": result_estimate,
+                        "free_text": text.strip(),
+                    }
+                    record_and_next(extra)
 
 # ===== DONE =====
 elif st.session_state.phase == "done":
