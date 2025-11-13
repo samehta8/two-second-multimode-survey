@@ -186,7 +186,7 @@ def get_worksheet():
 
 def append_row_to_sheet(ws, row: Dict[str, Any]):
     if ws is None:
-        st.warning("Sheets: no worksheet; not writing.")
+        # Silent: just don't write if no worksheet
         return
     ordered = [
         row.get("study_id",""),
@@ -216,7 +216,6 @@ def append_row_to_sheet(ws, row: Dict[str, Any]):
     ]
     try:
         ws.append_row(ordered, value_input_option="RAW")
-        st.toast("Saved to Google Sheet ✅", icon="✅")
     except Exception as e:
         st.error(f"Failed to append to Google Sheets: {e}")
 
@@ -309,11 +308,17 @@ After each stimulus, you will {'rate emotions (0–100) and estimate whether the
 Participation is voluntary; you may stop at any time.
     """)
 
+    # Generate a default ID if we don't have one yet
     if not st.session_state.participant_id:
         st.session_state.participant_id = generate_participant_id()
+
     agreed = st.checkbox("I consent to participate.")
     st.caption("A unique participant ID has been generated. You may override it if needed.")
-    st.text_input("Participant ID", key="participant_id")
+
+    participant_id_input = st.text_input(
+        "Participant ID",
+        value=st.session_state.participant_id,
+    )
 
     st.caption("Mode: " + mode + "  •  Change with ?mode=img_sliders | img_text | vid_sliders | vid_text")
 
@@ -321,6 +326,11 @@ Participation is voluntary; you may stop at any time.
         if not agreed:
             st.error("You must consent to proceed.")
         else:
+            # Make sure we store the final ID the participant saw/edited
+            final_pid = participant_id_input.strip()
+            if final_pid:
+                st.session_state.participant_id = final_pid
+
             st.session_state.consented = True
             st.session_state.consent_timestamp_iso = datetime.utcnow().isoformat() + "Z"
             advance("demographics")
@@ -445,6 +455,7 @@ elif st.session_state.phase == "rate":
                         "result_estimate": result_estimate,
                         "free_text": "",
                     }
+                    st.success("Response saved.")
                     record_and_next(extra)
 
     # Text modes: open text + result estimate (Won/Lost)
@@ -477,6 +488,7 @@ elif st.session_state.phase == "rate":
                         "result_estimate": result_estimate,
                         "free_text": text.strip(),
                     }
+                    st.success("Response saved.")
                     record_and_next(extra)
 
 # ===== DONE =====
