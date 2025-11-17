@@ -347,7 +347,7 @@ if st.session_state.phase == "consent":
     selected_mode = st.selectbox("Select study mode:", ALL_MODES, index=default_index)
     st.session_state.mode = selected_mode
 
-    st.write(f"This study presents { 'images' if selected_mode.startswith('img') else 'videos' } for 2 seconds.")
+    st.write(f"This study presents { 'images' if selected_mode.startswith('img') else 'videos' } for 2 seconds. You have to guess what emotions are being displayed by the athlete in each of these images or videos, and also provide an estimation of the result of the match. You can select or write multiple emotions. ")
 
     if not st.session_state.participant_id:
         st.session_state.participant_id = generate_participant_id()
@@ -477,7 +477,7 @@ elif st.session_state.phase == "rate":
     else:
         with st.form(f"text_form_{i}"):
             result = st.radio("Did the athlete win or lose?", ["Won", "Lost"], index=None)
-            text = st.text_area("Describe the emotions you saw:")
+            text = st.text_area("Describe the emotions you saw. If you are typing text, you can use words of any language you prefer:")
 
             if st.form_submit_button("Submit"):
                 if ss.trial_submitted:
