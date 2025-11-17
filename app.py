@@ -1,7 +1,8 @@
 # app.py — Multimode survey (no manifest, root media)
-# Uses all image/video files in the repo root with 2s exposure.
+# Uses all image/video files in the repo root with ~2s exposure.
 # Modes via URL: img_sliders (default), img_text, vid_sliders, vid_text.
 # Order is fully random each time a participant starts.
+# Includes: trial cap, dropout info, order logging, mode select UI, Sheets logging.
 
 # --- imports ---
 import time
@@ -20,10 +21,13 @@ import streamlit as st
 IMAGE_DIR = Path(".")   # or Path("images")
 VIDEO_DIR = Path(".")   # or Path("videos")
 
-SHOW_SECONDS = 2.0
+SHOW_SECONDS = 2.0           # target exposure duration (seconds)
+MAX_TRIALS = 30              # cap number of stimuli per participant
+MIN_TEXT_CHARS = 1           # minimum chars required in text responses
 
 # Modes: img_sliders (default) | img_text | vid_sliders | vid_text
 DEFAULT_MODE = "img_sliders"
+ALL_MODES = ["img_sliders", "img_text", "vid_sliders", "vid_text"]
 
 # Emotion sliders for slider modes
 EMOTIONS = [
@@ -97,10 +101,13 @@ with st.sidebar:
     st.write("age:", st.session_state.get("age"))
     st.write("gender:", st.session_state.get("gender"))
     st.write("nationality:", st.session_state.get("nationality"))
-    st.write("order:", st.session_state.get("order"))  # helpful to see permutations while testing
+    st.write("order:", st.session_state.get("order"))
+    st.write("total_trials:", st.session_state.get("total_trials"))
+    st.write("idx (0-based):", st.session_state.get("idx"))
 
 # -------------------- Utility --------------------
-def get_mode() -> str:
+def get_mode_from_query() -> str:
+    """Read initial mode from query params, fallback to DEFAULT_MODE."""
     try:
         params = st.query_params  # new Streamlit API
         raw = params.get("mode", [DEFAULT_MODE])
@@ -108,8 +115,7 @@ def get_mode() -> str:
     except Exception:
         params = st.experimental_get_query_params()
         mode = params.get("mode", [DEFAULT_MODE])[0]
-    valid = {"img_sliders", "img_text", "vid_sliders", "vid_text"}
-    return mode if mode in valid else DEFAULT_MODE
+    return mode if mode in ALL_MODES else DEFAULT_MODE
 
 def generate_participant_id() -> str:
     return uuid.uuid4().hex[:8].upper()
@@ -118,6 +124,7 @@ def randomize_order(n: int) -> List[int]:
     """
     Fully random order each time this is called.
     No dependence on participant_id.
+    Returns a permutation of indices [0..n-1].
     """
     order = list(range(n))
     random.shuffle(order)
@@ -164,11 +171,11 @@ def get_worksheet():
         try:
             ws = sh.worksheet("responses")
         except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title="responses", rows=4000, cols=40)
+            ws = sh.add_worksheet(title="responses", rows=4000, cols=50)
             ws.append_row([
                 "study_id", "mode", "participant_id", "consented", "consent_timestamp_iso",
                 "name", "age", "gender", "nationality",
-                "trial_index", "order_index",
+                "trial_index", "order_index", "total_trials", "n_completed", "order_sequence",
                 "media_kind", "media_file",
                 "rating_angry", "rating_happy", "rating_sad", "rating_scared",
                 "rating_surprised", "rating_neutral", "rating_disgusted", "rating_contempt",
@@ -200,6 +207,9 @@ def append_row_to_sheet(ws, row: Dict[str, Any]):
         row.get("nationality",""),
         row.get("trial_index",""),
         row.get("order_index",""),
+        row.get("total_trials",""),
+        row.get("n_completed",""),
+        row.get("order_sequence",""),
         row.get("media_kind",""),
         row.get("media_file",""),
         row.get("rating_angry",""),
@@ -214,17 +224,18 @@ def append_row_to_sheet(ws, row: Dict[str, Any]):
         row.get("free_text",""),
         row.get("response_timestamp_iso",""),
     ]
+    # Simple one-shot append; if you want retries we can add that later.
     try:
         ws.append_row(ordered, value_input_option="RAW")
     except Exception as e:
         st.error(f"Failed to append to Google Sheets: {e}")
 
 # -------------------- App state & flow --------------------
-def init_state(mode: str):
+def init_state(initial_mode: str):
     ss = st.session_state
     ss.setdefault("phase", "consent")
-    ss.setdefault("study_id", "two_second_multimode_nomf")
-    ss.setdefault("mode", mode)
+    # mode is stored once and then locked; initial_mode comes from query param
+    ss.setdefault("mode", initial_mode)
 
     # Participant info
     ss.setdefault("consented", False)
@@ -237,8 +248,10 @@ def init_state(mode: str):
 
     # Media selection
     ss.setdefault("media_list", [])      # list[Path]
-    ss.setdefault("idx", 0)
-    ss.setdefault("order", [])
+    ss.setdefault("idx", 0)              # current trial index (0-based within selected trials)
+    ss.setdefault("order", [])           # list of indices
+    ss.setdefault("total_trials", 0)     # number of trials selected
+    ss.setdefault("order_sequence", "")  # string of comma-separated indices
     ss.setdefault("show_started_at", None)
 
     # Responses
@@ -247,13 +260,18 @@ def init_state(mode: str):
     # Sheets
     ss.setdefault("ws", None)
 
+    # Trial submission guard
+    ss.setdefault("current_trial", None)
+    ss.setdefault("trial_submitted", False)
+
 def advance(phase: str):
     st.session_state.phase = phase
     st.rerun()
 
 def record_and_next(extra: Dict[str, Any]):
     ss = st.session_state
-    total = len(ss.media_list)
+    mode = ss.mode
+    total = ss.total_trials or len(ss.order)
     i = ss.idx
     order_index = i + 1
     media_idx = ss.order[i]
@@ -261,7 +279,7 @@ def record_and_next(extra: Dict[str, Any]):
 
     base_row = {
         "study_id": ss.study_id,
-        "mode": ss.mode,
+        "mode": mode,
         "participant_id": ss.participant_id,
         "consented": ss.consented,
         "consent_timestamp_iso": ss.consent_timestamp_iso,
@@ -269,9 +287,12 @@ def record_and_next(extra: Dict[str, Any]):
         "age": ss.age,
         "gender": ss.gender,
         "nationality": ss.nationality,
-        "trial_index": media_idx + 1,
-        "order_index": order_index,
-        "media_kind": "image" if ss.mode.startswith("img") else "video",
+        "trial_index": media_idx + 1,            # index in full media list (1-based)
+        "order_index": order_index,              # 1..total_trials
+        "total_trials": total,
+        "n_completed": order_index,              # how many trials completed at this row
+        "order_sequence": ss.order_sequence,     # same string for all trials
+        "media_kind": "image" if mode.startswith("img") else "video",
         "media_file": media_path.name,
         **extra,
         "response_timestamp_iso": datetime.utcnow().isoformat() + "Z",
@@ -282,12 +303,18 @@ def record_and_next(extra: Dict[str, Any]):
 
     ss.idx += 1
     ss.show_started_at = None
+    ss.trial_submitted = False
+    ss.current_trial = None
+
     ss.phase = "done" if ss.idx >= total else "show"
     st.rerun()
 
 # -------------------- Run --------------------
-mode = get_mode()
-init_state(mode)
+initial_mode = get_mode_from_query()
+init_state(initial_mode)
+
+# Lock mode in state but let consent screen override it explicitly
+mode = st.session_state.mode
 
 # One-time connect to Sheets (if configured)
 if st.session_state.ws is None and SHEET_URL:
@@ -301,6 +328,17 @@ if st.session_state.phase == "consent":
     if st.button("🔁 Reset for new participant"):
         st.session_state.clear()
         st.rerun()
+
+    # Mode selection dropdown
+    st.subheader("Study version")
+    default_index = ALL_MODES.index(mode) if mode in ALL_MODES else 0
+    selected_mode = st.selectbox(
+        "Please select the version of the study.",
+        ALL_MODES,
+        index=default_index,
+    )
+    st.session_state.mode = selected_mode
+    mode = selected_mode  # local convenience
 
     st.write(f"""
 This study shows a series of **{'images' if mode.startswith('img') else 'videos'}** for **{SHOW_SECONDS:.0f} seconds** each.
@@ -320,13 +358,11 @@ Participation is voluntary; you may stop at any time.
         value=st.session_state.participant_id,
     )
 
-    st.caption("Mode: " + mode + "  •  Change with ?mode=img_sliders | img_text | vid_sliders | vid_text")
-
     if st.button("Continue"):
         if not agreed:
             st.error("You must consent to proceed.")
         else:
-            # Make sure we store the final ID the participant saw/edited
+            # Store the final ID the participant saw/edited
             final_pid = participant_id_input.strip()
             if final_pid:
                 st.session_state.participant_id = final_pid
@@ -337,6 +373,7 @@ Participation is voluntary; you may stop at any time.
 
 # ===== DEMOGRAPHICS =====
 elif st.session_state.phase == "demographics":
+    mode = st.session_state.mode
     st.title("Participant Information")
 
     with st.form("demographics"):
@@ -376,23 +413,34 @@ elif st.session_state.phase == "demographics":
                     st.error(f"No media files found in this folder for mode '{mode}'.")
                     st.stop()
 
-                st.session_state.media_list = media_files
-                n_media = len(media_files)
+                # Random order of full pool
+                full_n = len(media_files)
+                full_order = randomize_order(full_n)
 
-                # Fully random order each time demographics is submitted
-                st.session_state.order = randomize_order(n_media)
+                # Cap to MAX_TRIALS
+                n_trials = min(full_n, MAX_TRIALS)
+                selected_indices = full_order[:n_trials]
+
+                st.session_state.media_list = media_files
+                st.session_state.order = selected_indices
+                st.session_state.total_trials = n_trials
+                st.session_state.order_sequence = ",".join(str(idx) for idx in selected_indices)
 
                 st.session_state.idx = 0
                 st.session_state.show_started_at = None
+                st.session_state.current_trial = None
+                st.session_state.trial_submitted = False
+
                 advance("show")
             else:
                 st.error("Please complete all demographic fields before starting.")
 
-# ===== SHOW (stable 2s exposure) =====
+# ===== SHOW (stable ~2s exposure) =====
 elif st.session_state.phase == "show":
+    mode = st.session_state.mode
     media_list = st.session_state.media_list
-    total_media = len(media_list)
-    if total_media == 0:
+    total = st.session_state.total_trials or len(st.session_state.order)
+    if total == 0:
         st.error("No media selected. Please restart the study.")
         st.stop()
 
@@ -406,7 +454,7 @@ elif st.session_state.phase == "show":
     elapsed = time.time() - st.session_state.show_started_at
     remaining = SHOW_SECONDS - elapsed
 
-    st.subheader(f"Stimulus {i+1} of {total_media}")
+    st.subheader(f"Stimulus {i+1} of {total}")
 
     if mode.startswith("img"):
         render_image_responsive(str(path), max_vw=80, max_vh=70)
@@ -422,15 +470,22 @@ elif st.session_state.phase == "show":
 
 # ===== RATE — sliders or text depending on mode =====
 elif st.session_state.phase == "rate":
-    media_list = st.session_state.media_list
-    total_media = len(media_list)
-    i = st.session_state.idx
+    ss = st.session_state
+    mode = ss.mode
+    media_list = ss.media_list
+    total = ss.total_trials or len(ss.order)
+    i = ss.idx
     pos_1based = i + 1
 
-    st.subheader(f"Respond to the last stimulus ({pos_1based} of {total_media})")
+    # trial submission guard: set current_trial when entering this phase
+    if ss.current_trial != i:
+        ss.current_trial = i
+        ss.trial_submitted = False
+
+    st.subheader(f"Respond to the last stimulus ({pos_1based} of {total})")
 
     # Slider modes: emotions sliders + result estimate (Won/Lost)
-    if "sliders" in st.session_state.mode:
+    if "sliders" in mode:
         st.caption("Move each slider (0–100). Then estimate whether the athlete won or lost the match.")
         with st.form(key=f"ratings_form_{i}"):
             sliders = {}
@@ -447,9 +502,12 @@ elif st.session_state.phase == "rate":
 
             submitted = st.form_submit_button("Submit")
             if submitted:
-                if result_estimate is None:
+                if ss.trial_submitted:
+                    st.warning("This response has already been recorded.")
+                elif result_estimate is None:
                     st.error("Please select Win or Lose before continuing.")
                 else:
+                    ss.trial_submitted = True
                     extra = {
                         **ratings_to_dict(sliders),
                         "result_estimate": result_estimate,
@@ -479,9 +537,14 @@ elif st.session_state.phase == "rate":
 
             submitted = st.form_submit_button("Submit")
             if submitted:
-                if result_estimate is None:
+                if ss.trial_submitted:
+                    st.warning("This response has already been recorded.")
+                elif result_estimate is None:
                     st.error("Please select Win or Lose before continuing.")
+                elif len(text.strip()) < MIN_TEXT_CHARS:
+                    st.error("Please enter a brief text response before continuing.")
                 else:
+                    ss.trial_submitted = True
                     extra = {
                         "rating_angry": "", "rating_happy": "", "rating_sad": "", "rating_scared": "",
                         "rating_surprised": "", "rating_neutral": "", "rating_disgusted": "", "rating_contempt": "",
