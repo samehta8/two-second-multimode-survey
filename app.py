@@ -1,6 +1,6 @@
 # app.py — Multimode survey (no manifest, root media)
 # Uses all image/video files in the repo root with ~2s exposure.
-# Modes via URL: img_sliders (default), img_text, vid_sliders, vid_text.
+# Modes via UI/URL: img_sliders (default), img_text, vid_sliders, vid_text.
 # Order is fully random each time a participant starts.
 # Includes: trial cap, dropout info, order logging, mode select UI, Sheets logging.
 
@@ -16,6 +16,9 @@ from typing import List, Dict, Any
 import streamlit as st
 
 # ======================== CONFIG ========================
+# Study ID label (for your data)
+STUDY_ID = "two_second_multimode_nomf_v2"
+
 # Currently use repo root as media directory, since your files are not in folders.
 # If you later move them into images/ and videos/, change these to Path("images") / Path("videos").
 IMAGE_DIR = Path(".")   # or Path("images")
@@ -95,6 +98,7 @@ with st.sidebar:
         st.write("Service account:", "(not loaded)")
 
     st.subheader("Current participant fields")
+    st.write("study_id:", st.session_state.get("study_id"))
     st.write("mode:", st.session_state.get("mode"))
     st.write("participant_id:", st.session_state.get("participant_id"))
     st.write("name:", st.session_state.get("name"))
@@ -224,7 +228,6 @@ def append_row_to_sheet(ws, row: Dict[str, Any]):
         row.get("free_text",""),
         row.get("response_timestamp_iso",""),
     ]
-    # Simple one-shot append; if you want retries we can add that later.
     try:
         ws.append_row(ordered, value_input_option="RAW")
     except Exception as e:
@@ -234,6 +237,8 @@ def append_row_to_sheet(ws, row: Dict[str, Any]):
 def init_state(initial_mode: str):
     ss = st.session_state
     ss.setdefault("phase", "consent")
+    # Basic identifiers
+    ss.setdefault("study_id", STUDY_ID)
     # mode is stored once and then locked; initial_mode comes from query param
     ss.setdefault("mode", initial_mode)
 
@@ -278,7 +283,7 @@ def record_and_next(extra: Dict[str, Any]):
     media_path = ss.media_list[media_idx]
 
     base_row = {
-        "study_id": ss.study_id,
+        "study_id": ss.get("study_id", STUDY_ID),
         "mode": mode,
         "participant_id": ss.participant_id,
         "consented": ss.consented,
